@@ -1,0 +1,10 @@
+{
+  "indexes": [
+    { "collectionGroup": "email_logs", "queryScope": "COLLECTION",
+      "fields": [{ "fieldPath": "ts", "order": "DESCENDING" }] },
+    { "collectionGroup": "contacts", "queryScope": "COLLECTION",
+      "fields": [{ "fieldPath": "verification", "order": "ASCENDING" },
+                 { "fieldPath": "createdAt", "order": "DESCENDING" }] }
+  ],
+  "fieldOverrides": []
+}

@@ -1,0 +1,14 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // This app authenticates locally and accesses Firestore exclusively through
+    // its server-side API using the Firebase Admin SDK, which BYPASSES these
+    // rules. Therefore all *direct client* access is denied. Do not loosen this
+    // without re-introducing Firebase Auth — the web config ships to browsers,
+    // so any allowed path is world-accessible.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
