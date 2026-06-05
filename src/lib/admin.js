@@ -43,6 +43,10 @@ export function getAdminDb() {
     }
   }
   _db = getFirestore();
+  // Prefer REST transport. firebase-admin's default gRPC connection is
+  // unreliable in short-lived serverless instances (e.g. Vercel) and can hang
+  // or time out on cold starts; REST avoids that. Must run before first use.
+  try { _db.settings({ preferRest: true }); } catch {}
   return _db;
 }
 

@@ -6,7 +6,9 @@ import { verifySession, SESSION_COOKIE } from "./store";
 
 export async function currentUser() {
   const token = cookies().get(SESSION_COOKIE)?.value;
-  return verifySession(token);
+  // Never let a transient store/Firestore error crash the request — treat it as
+  // "not authenticated" so callers return a clean 401 instead of a 500.
+  try { return await verifySession(token); } catch { return null; }
 }
 
 // Returns { user } on success, or { error: <NextResponse> } to short-circuit.
