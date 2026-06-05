@@ -30,9 +30,12 @@ export default function ContactsPage() {
 
   const load = () => {
     setLoading(true);
-    Promise.all([listContacts(), listUploads()])
-      .then(([c, u]) => { setContacts(c); setUploads(u); setLoading(false); })
-      .catch(() => setLoading(false));
+    // Load independently so a hiccup in one request never blanks the other.
+    listContacts()
+      .then(setContacts)
+      .catch((e) => { setContacts([]); flash(`Couldn't load contacts: ${e.message || "error"}`); })
+      .finally(() => setLoading(false));
+    listUploads().then(setUploads).catch(() => setUploads([]));
   };
   useEffect(load, []);
 
