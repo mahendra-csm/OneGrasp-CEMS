@@ -1,26 +1,26 @@
-// Server-only local user store + sessions. Replaces Firebase Auth so the app
-// works with built-in default credentials and admin-managed accounts — no
-// cloud project required. Persisted to data/users.json.
+// Server-only user store + sessions, backed by Firestore (Admin SDK). Works on
+// read-only/serverless hosts like Vercel — no local files. Replaces Firebase
+// Auth so the app uses admin-managed accounts.
 //
-// NOTE: this is a lightweight, file-backed store suitable for a single-instance
-// internal deployment. For multi-instance/production use, move to a real DB.
+// All queries are async. Session tokens are HMAC-signed cookie values
+// "<userId>.<sig>"; signing is sync, verifying hits Firestore to confirm the
+// user still exists and is enabled.
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import {
-  randomBytes, scryptSync, timingSafeEqual, createHmac, randomUUID,
-} from "node:crypto";
+import { randomBytes, scryptSync, timingSafeEqual, createHmac } from "node:crypto";
+import { FieldValue } from "firebase-admin/firestore";
+import { getAdminDb } from "./admin";
 import { ALL_FEATURES, FEATURE_KEYS, DEFAULT_CONTRIBUTOR_FEATURES } from "./features";
 
-const DATA_DIR = join(process.cwd(), "data");
-const FILE = join(DATA_DIR, "users.json");
 const SECRET = process.env.AUTH_SECRET || "onegrasp-cems-dev-secret-change-me";
+const COLLECTION = "users";
 
 const DEFAULT_ADMIN = {
   name: "OneGrasp Support",
   email: "support@onegrasp.com",
   password: "OneGrasp@2026",
 };
+
+const col = () => getAdminDb().collection(COLLECTION);
 
 // ---- password hashing (scrypt, no external deps) ----
 function hashPassword(pw) {
@@ -36,127 +36,124 @@ function verifyPassword(pw, stored) {
   return test.length === orig.length && timingSafeEqual(test, orig);
 }
 
-// ---- persistence ----
-function ensureDir() {
-  if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
-}
-function seedData() {
-  return {
-    users: [
-      {
-        id: randomUUID(),
-        name: DEFAULT_ADMIN.name,
-        email: DEFAULT_ADMIN.email,
-        role: "admin",
-        enabled: true,
-        features: [...FEATURE_KEYS],
-        password: hashPassword(DEFAULT_ADMIN.password),
-        createdAt: new Date().toISOString(),
-      },
-    ],
-  };
-}
-function load() {
-  if (!existsSync(FILE)) {
-    const data = seedData();
-    save(data);
-    return data;
-  }
-  try {
-    return JSON.parse(readFileSync(FILE, "utf8"));
-  } catch {
-    const data = seedData();
-    save(data);
-    return data;
-  }
-}
-function save(data) {
-  ensureDir();
-  writeFileSync(FILE, JSON.stringify(data, null, 2));
-}
-
 // strip the password hash before anything leaves this module
-function publicUser(u) {
-  if (!u) return null;
-  const { password, ...rest } = u;
+function publicUser(snapOrObj) {
+  if (!snapOrObj) return null;
+  const data = typeof snapOrObj.data === "function"
+    ? { id: snapOrObj.id, ...snapOrObj.data() }
+    : snapOrObj;
+  const { password, emailLower, ...rest } = data;
   return rest;
 }
 
-const sameEmail = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
+const norm = (e) => String(e || "").toLowerCase().trim();
+
+// Seed the default admin once, if the collection is empty. Safe to call often.
+async function ensureSeed() {
+  const any = await col().limit(1).get();
+  if (!any.empty) return;
+  await col().add({
+    name: DEFAULT_ADMIN.name,
+    email: DEFAULT_ADMIN.email,
+    emailLower: norm(DEFAULT_ADMIN.email),
+    role: "admin",
+    enabled: true,
+    features: [...FEATURE_KEYS],
+    password: hashPassword(DEFAULT_ADMIN.password),
+    createdAt: FieldValue.serverTimestamp(),
+  });
+}
+
+async function allUsersRaw() {
+  const snap = await col().get();
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
 
 // ---- queries ----
-export function listUsers() {
-  return load().users.map(publicUser);
+export async function listUsers() {
+  await ensureSeed();
+  const users = await allUsersRaw();
+  return users.map(publicUser);
 }
-export function findById(id) {
-  return load().users.find((u) => u.id === id) || null;
+
+export async function findById(id) {
+  if (!id) return null;
+  const snap = await col().doc(id).get();
+  return snap.exists ? { id: snap.id, ...snap.data() } : null;
 }
 
 // ---- auth ----
-export function authenticate(email, password) {
-  const u = load().users.find((x) => sameEmail(x.email, email));
-  if (!u || !u.enabled) return null;
+export async function authenticate(email, password) {
+  await ensureSeed();
+  const snap = await col().where("emailLower", "==", norm(email)).limit(1).get();
+  if (snap.empty) return null;
+  const u = { id: snap.docs[0].id, ...snap.docs[0].data() };
+  if (!u.enabled) return null;
   if (!verifyPassword(password, u.password)) return null;
   return publicUser(u);
 }
 
 // ---- admin CRUD ----
-export function createUser({ name, email, password, role = "contributor", features }) {
-  const data = load();
-  if (data.users.some((u) => sameEmail(u.email, email))) throw new Error("EMAIL_TAKEN");
+export async function createUser({ name, email, password, role = "contributor", features }) {
+  const exists = await col().where("emailLower", "==", norm(email)).limit(1).get();
+  if (!exists.empty) throw new Error("EMAIL_TAKEN");
   const isAdmin = role === "admin";
-  const u = {
-    id: randomUUID(),
+  const doc = {
     name: name || email,
     email,
+    emailLower: norm(email),
     role: isAdmin ? "admin" : "contributor",
     enabled: true,
-    features: isAdmin
-      ? [...FEATURE_KEYS]
-      : sanitizeFeatures(features || DEFAULT_CONTRIBUTOR_FEATURES),
+    features: isAdmin ? [...FEATURE_KEYS] : sanitizeFeatures(features || DEFAULT_CONTRIBUTOR_FEATURES),
     password: hashPassword(password),
-    createdAt: new Date().toISOString(),
+    createdAt: FieldValue.serverTimestamp(),
   };
-  data.users.push(u);
-  save(data);
-  return publicUser(u);
+  const ref = await col().add(doc);
+  return publicUser({ id: ref.id, ...doc });
 }
 
-export function updateUser(id, patch) {
-  const data = load();
-  const u = data.users.find((x) => x.id === id);
-  if (!u) throw new Error("NOT_FOUND");
+export async function updateUser(id, patch) {
+  const ref = col().doc(id);
+  const snap = await ref.get();
+  if (!snap.exists) throw new Error("NOT_FOUND");
+  const u = { id: snap.id, ...snap.data() };
+  const next = {};
 
-  if (patch.name !== undefined) u.name = patch.name;
+  if (patch.name !== undefined) next.name = patch.name;
   if (patch.role !== undefined) {
-    u.role = patch.role === "admin" ? "admin" : "contributor";
-    if (u.role === "admin") u.features = [...FEATURE_KEYS];
+    next.role = patch.role === "admin" ? "admin" : "contributor";
+    if (next.role === "admin") next.features = [...FEATURE_KEYS];
   }
-  if (patch.enabled !== undefined) u.enabled = !!patch.enabled;
-  if (patch.features !== undefined && u.role !== "admin") {
-    u.features = sanitizeFeatures(patch.features);
+  if (patch.enabled !== undefined) next.enabled = !!patch.enabled;
+  const effectiveRole = next.role ?? u.role;
+  if (patch.features !== undefined && effectiveRole !== "admin") {
+    next.features = sanitizeFeatures(patch.features);
   }
-  if (patch.password) u.password = hashPassword(patch.password);
+  if (patch.password) next.password = hashPassword(patch.password);
 
   // never strand the system without an enabled admin
-  if (u.role !== "admin" || u.enabled === false) {
-    const liveAdmins = data.users.filter((x) => x.role === "admin" && x.enabled);
+  const merged = { ...u, ...next };
+  if (merged.role !== "admin" || merged.enabled === false) {
+    const all = await allUsersRaw();
+    const liveAdmins = all.filter((x) => (x.id === id ? merged : x))
+      .filter((x) => x.role === "admin" && x.enabled);
     if (liveAdmins.length === 0) throw new Error("LAST_ADMIN");
   }
 
-  save(data);
-  return publicUser(u);
+  await ref.set(next, { merge: true });
+  return publicUser(merged);
 }
 
-export function deleteUser(id) {
-  const data = load();
-  const u = data.users.find((x) => x.id === id);
-  if (!u) throw new Error("NOT_FOUND");
-  if (u.role === "admin" && data.users.filter((x) => x.role === "admin").length <= 1) {
-    throw new Error("LAST_ADMIN");
+export async function deleteUser(id) {
+  const ref = col().doc(id);
+  const snap = await ref.get();
+  if (!snap.exists) throw new Error("NOT_FOUND");
+  const u = { id: snap.id, ...snap.data() };
+  if (u.role === "admin") {
+    const all = await allUsersRaw();
+    if (all.filter((x) => x.role === "admin").length <= 1) throw new Error("LAST_ADMIN");
   }
-  data.users = data.users.filter((x) => x.id !== id);
-  save(data);
+  await ref.delete();
 }
 
 function sanitizeFeatures(features) {
@@ -169,7 +166,8 @@ export function signSession(userId) {
   const sig = createHmac("sha256", SECRET).update(userId).digest("hex");
   return `${userId}.${sig}`;
 }
-export function verifySession(token) {
+
+export async function verifySession(token) {
   if (!token || !token.includes(".")) return null;
   const idx = token.lastIndexOf(".");
   const userId = token.slice(0, idx);
@@ -177,7 +175,7 @@ export function verifySession(token) {
   const expected = createHmac("sha256", SECRET).update(userId).digest("hex");
   if (sig.length !== expected.length) return null;
   if (!timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
-  const u = findById(userId);
+  const u = await findById(userId);
   if (!u || !u.enabled) return null;
   return publicUser(u);
 }

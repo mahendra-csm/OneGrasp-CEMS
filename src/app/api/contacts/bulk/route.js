@@ -6,7 +6,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(req) {
-  const { error } = requireUser();
+  const { error } = await requireUser();
   if (error) return error;
   try {
     const { rows } = await req.json().catch(() => ({ rows: [] }));

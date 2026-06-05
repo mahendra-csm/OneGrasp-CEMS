@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 // Cascade-delete an upload set: removes the set doc + all its contacts.
 export async function DELETE(_req, { params }) {
-  const { error } = requireUser();
+  const { error } = await requireUser();
   if (error) return error;
   try {
     const result = await deleteUploadSet(params.id);

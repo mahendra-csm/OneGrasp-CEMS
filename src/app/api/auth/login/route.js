@@ -9,7 +9,7 @@ export async function POST(req) {
   if (!email || !password) {
     return NextResponse.json({ error: "Email and password are required." }, { status: 400 });
   }
-  const user = authenticate(email, password);
+  const user = await authenticate(email, password);
   if (!user) {
     return NextResponse.json({ error: "Incorrect email or password." }, { status: 401 });
   }

@@ -6,13 +6,13 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const { error } = requireAdmin();
+  const { error } = await requireAdmin();
   if (error) return error;
-  return NextResponse.json({ users: listUsers() });
+  return NextResponse.json({ users: await listUsers() });
 }
 
 export async function POST(req) {
-  const { error } = requireAdmin();
+  const { error } = await requireAdmin();
   if (error) return error;
 
   const body = await req.json().catch(() => ({}));
@@ -23,7 +23,7 @@ export async function POST(req) {
     return NextResponse.json({ error: "Password must be at least 6 characters." }, { status: 400 });
   }
   try {
-    const user = createUser(body);
+    const user = await createUser(body);
     return NextResponse.json({ user }, { status: 201 });
   } catch (e) {
     if (e.message === "EMAIL_TAKEN")

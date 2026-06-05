@@ -6,12 +6,12 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function PATCH(req, { params }) {
-  const { error } = requireAdmin();
+  const { error } = await requireAdmin();
   if (error) return error;
 
   const body = await req.json().catch(() => ({}));
   try {
-    const user = updateUser(params.id, body);
+    const user = await updateUser(params.id, body);
     return NextResponse.json({ user });
   } catch (e) {
     if (e.message === "NOT_FOUND")
@@ -23,13 +23,13 @@ export async function PATCH(req, { params }) {
 }
 
 export async function DELETE(_req, { params }) {
-  const { error, user } = requireAdmin();
+  const { error, user } = await requireAdmin();
   if (error) return error;
   if (user.id === params.id) {
     return NextResponse.json({ error: "You cannot delete your own account." }, { status: 400 });
   }
   try {
-    deleteUser(params.id);
+    await deleteUser(params.id);
     return NextResponse.json({ ok: true });
   } catch (e) {
     if (e.message === "NOT_FOUND")

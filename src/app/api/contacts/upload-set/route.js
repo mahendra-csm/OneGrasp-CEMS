@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 // Email-only "set" import. Body: { name, date (YYYY-MM-DD), emails: string[] }.
 export async function POST(req) {
-  const { error } = requireUser();
+  const { error } = await requireUser();
   if (error) return error;
   try {
     const { name, date, emails } = await req.json().catch(() => ({}));
