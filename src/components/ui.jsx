@@ -49,14 +49,14 @@ const STATUS_STYLES = {
 };
 
 const STATUS_LABELS = {
-  uploaded: "Uploaded", stage_2d: "2 days", stage_5d: "5 days", stage_7d: "7 days",
-  awaiting: "Awaiting", due: "Follow-up due", followed_up: "Followed up",
+  uploaded: "New Prospect", stage_2d: "F1 (day 2)", stage_5d: "F2 (day 5)", stage_7d: "F3 (day 7)",
+  awaiting: "New prospect", due: "Follow-up due", followed_up: "Follow-up sent",
   replied: "Replied", bounced: "Bounced", no_response: "No response",
 };
 
-export function StatusBadge({ status }) {
-  const label = STATUS_LABELS[status] || status;
-  return <span className={`badge ${STATUS_STYLES[status] || "bg-navy-50 text-navy-500"}`}>{label}</span>;
+export function StatusBadge({ status, label }) {
+  const text = label || STATUS_LABELS[status] || status;
+  return <span className={`badge ${STATUS_STYLES[status] || "bg-navy-50 text-navy-500"}`}>{text}</span>;
 }
 
 export function EmptyState({ icon: Icon, title, hint, children }) {

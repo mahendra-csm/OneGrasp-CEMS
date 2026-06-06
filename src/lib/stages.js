@@ -16,23 +16,47 @@ export const STAGES = [
 
 export const UPLOADED = { key: "uploaded", days: 0, label: "Uploaded" };
 
-// All stages oldest → newest for filters / stat cards.
+// All stages oldest → newest for filters / stat cards. Labelled in the team's
+// F1/F2/F3 follow-up language (F1 = +2 days, F2 = +5 days, F3 = +7 days).
 export const ALL_STAGES = [
-  UPLOADED,
-  { key: "stage_2d", days: 2, label: "2 days" },
-  { key: "stage_5d", days: 5, label: "5 days" },
-  { key: "stage_7d", days: 7, label: "7 days" },
+  { key: "uploaded", days: 0, label: "New Prospect" },
+  { key: "stage_2d", days: 2, label: "F1 (day 2)" },
+  { key: "stage_5d", days: 5, label: "F2 (day 5)" },
+  { key: "stage_7d", days: 7, label: "F3 (day 7)" },
+];
+
+// The follow-up cadence as F-steps (drives the queue grouping + labels).
+export const FOLLOWUPS = [
+  { n: 1, stage: "stage_2d", day: 2, label: "Follow-up 1", short: "F1" },
+  { n: 2, stage: "stage_5d", day: 5, label: "Follow-up 2", short: "F2" },
+  { n: 3, stage: "stage_7d", day: 7, label: "Follow-up 3", short: "F3" },
 ];
 
 // Follow-up statuses (derived). `terminal` ones stop the contact being chased.
 export const FOLLOWUP_STATUSES = [
-  { key: "awaiting",    label: "Awaiting" },
+  { key: "awaiting",    label: "New prospect" },
   { key: "due",         label: "Follow-up due" },
-  { key: "followed_up", label: "Followed up" },
+  { key: "followed_up", label: "Follow-up sent" },
   { key: "replied",     label: "Replied",     terminal: true },
   { key: "bounced",     label: "Bounced",     terminal: true },
   { key: "no_response", label: "No response", terminal: true },
 ];
+
+// The follow-up number in play for a contact: the NEXT one to send (when due)
+// or the LAST one sent. 0 = none yet. Capped at the number of F-steps.
+export function followUpNumber(c) {
+  return Math.min((c?.followUpCount || 0) + 1, FOLLOWUPS.length);
+}
+
+// Rich display for a contact's follow-up state: a colour-tone key + F-aware text.
+export function followUpView(c) {
+  const status = c?.followUpStatus;
+  const sent = c?.followUpCount || 0;
+  if (status === "due") return { tone: "due", label: `F${Math.min(sent + 1, FOLLOWUPS.length)} due` };
+  if (status === "followed_up") return { tone: "followed_up", label: `F${sent} sent` };
+  if (status === "awaiting") return { tone: "awaiting", label: "New prospect" };
+  return { tone: status, label: followUpLabel(status) };
+}
 
 export const TERMINAL_OUTCOMES = new Set(["replied", "bounced", "no_response"]);
 

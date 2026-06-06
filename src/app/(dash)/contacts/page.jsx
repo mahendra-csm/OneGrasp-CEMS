@@ -12,7 +12,9 @@ import { StatusBadge, EmptyState } from "@/components/ui";
 import {
   listContacts, listUploads, uploadContactSet, deleteUploadSet, createContact, updateOne, classify, removeOne,
 } from "@/lib/firestore";
-import { ALL_STAGES, FOLLOWUP_STATUSES, followUpStatusFor, stageRank, stageLabel } from "@/lib/stages";
+import {
+  ALL_STAGES, FOLLOWUP_STATUSES, FOLLOWUPS, followUpStatusFor, followUpView, followUpNumber, stageLabel,
+} from "@/lib/stages";
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -51,6 +53,29 @@ export default function ContactsPage() {
     return c;
   }, [contacts]);
 
+  // Cumulative follow-ups SENT, per F-step (F1 sent = received ≥1 follow-up …).
+  const sent = useMemo(() => {
+    const s = { f1: 0, f2: 0, f3: 0 };
+    for (const c of contacts) {
+      const n = c.followUpCount || 0;
+      if (n >= 1) s.f1++; if (n >= 2) s.f2++; if (n >= 3) s.f3++;
+    }
+    return s;
+  }, [contacts]);
+
+  // Today's follow-up plan (Account B): due contacts grouped by which F is next.
+  const dueByF = useMemo(() => {
+    const g = { 1: [], 2: [], 3: [] };
+    for (const c of contacts) {
+      if (!c.due) continue;
+      if (setFilter !== "all" && c.setName !== setFilter) continue;
+      g[followUpNumber(c)].push(c);
+    }
+    return g;
+  }, [contacts, setFilter]);
+
+  const totalDue = dueByF[1].length + dueByF[2].length + dueByF[3].length;
+
   // Per-set: total + due counts (live).
   const setStats = useMemo(() => {
     const m = {};
@@ -63,20 +88,14 @@ export default function ContactsPage() {
     return m;
   }, [contacts]);
 
-  // The work queue: everything due now, most urgent (latest milestone) first.
-  const queue = useMemo(
-    () => contacts
-      .filter((c) => c.due && (setFilter === "all" || c.setName === setFilter))
-      .sort((a, b) => stageRank(b.stage) - stageRank(a.stage) || (b.daysSinceUpload - a.daysSinceUpload)),
-    [contacts, setFilter]
-  );
-
   const filtered = useMemo(() => {
     const t = q.toLowerCase();
     return contacts.filter((c) => {
       const matchQ = !t || `${c.email} ${c.setName || ""}`.toLowerCase().includes(t);
       const matchStage = stageFilter === "all" || c.stage === stageFilter;
-      const matchStatus = statusFilter === "all" || c.followUpStatus === statusFilter;
+      const matchStatus = statusFilter === "all"
+        || (statusFilter === "issues" ? (c.followUpStatus === "bounced" || c.followUpStatus === "no_response")
+            : c.followUpStatus === statusFilter);
       const matchSet = setFilter === "all" || c.setName === setFilter;
       return matchQ && matchStage && matchStatus && matchSet;
     });
@@ -107,14 +126,17 @@ export default function ContactsPage() {
     try { await updateOne("contacts", c.id, { outcome }); } catch { flash("Couldn't save — reloading."); load(); }
   }
 
-  async function logAllInQueue() {
-    if (!queue.length) return;
-    const ids = queue.map((c) => ({ id: c.id, stage: c.stage, n: (c.followUpCount || 0) + 1 }));
-    ids.forEach(({ id, stage, n }) => patchLocal(id, { lastFollowUpStage: stage, followUpCount: n, lastContacted: new Date().toISOString() }));
+  // Mark a whole F-group as sent (Account B's "send all F1 today" action).
+  async function logAllForGroup(list, fn) {
+    if (!list.length) return;
+    if (!confirm(`Mark Follow-up ${fn} as sent for ${list.length} contact(s)?`)) return;
+    const ts = new Date().toISOString();
+    const ids = list.map((c) => ({ id: c.id, stage: c.stage, n: (c.followUpCount || 0) + 1 }));
+    ids.forEach(({ id, stage, n }) => patchLocal(id, { lastFollowUpStage: stage, followUpCount: n, lastContacted: ts }));
     try {
       await Promise.all(ids.map(({ id, stage, n }) =>
-        updateOne("contacts", id, { lastFollowUpStage: stage, followUpCount: n, lastContacted: new Date().toISOString() })));
-      flash(`Logged a follow-up for ${ids.length} contact(s)`);
+        updateOne("contacts", id, { lastFollowUpStage: stage, followUpCount: n, lastContacted: ts })));
+      flash(`Marked F${fn} sent for ${ids.length} contact(s)`);
     } catch { flash("Some updates failed — reloading."); load(); }
   }
 
@@ -145,20 +167,20 @@ export default function ContactsPage() {
   }
 
   const KPIS = [
-    { key: "all", label: "Total", value: counts.total, tone: "text-navy-900" },
-    { key: "due", label: "Follow-up due", value: counts.due, tone: "text-amber-600" },
-    { key: "followed_up", label: "Followed up", value: counts.followed_up, tone: "text-sky-600" },
+    { key: "all", label: "New Prospects", value: counts.total, tone: "text-navy-900" },
+    { key: "due", label: "Follow-up due", value: totalDue, tone: "text-amber-600" },
     { key: "replied", label: "Replied", value: counts.replied, tone: "text-emerald-600" },
+    { key: "issues", label: "Bounced / No reply", value: counts.bounced + counts.no_response, tone: "text-rose-500" },
   ];
 
   return (
     <>
       <Topbar
         title="Follow-up Repository"
-        subtitle={`${contacts.length.toLocaleString()} sent · ${counts.due} due now`}
+        subtitle={`${contacts.length.toLocaleString()} prospects · ${totalDue.toLocaleString()} follow-ups due today`}
         action={
           <div className="flex items-center gap-2">
-            <button onClick={() => setShowUpload(true)} className="btn-accent"><Upload size={16} /> Upload Set</button>
+            <button onClick={() => setShowUpload(true)} className="btn-accent"><Upload size={16} /> Upload Batch</button>
             <button onClick={() => setShowAdd(true)} className="btn-ghost"><Plus size={16} /> Add</button>
           </div>
         }
@@ -182,43 +204,64 @@ export default function ContactsPage() {
           ))}
         </div>
 
-        {/* ---- Follow-up queue: the thing you actually work ---- */}
+        {/* ---- Cumulative follow-ups sent (matches the business plan table) ---- */}
+        <div className="grid grid-cols-3 gap-3">
+          {FOLLOWUPS.map((f) => (
+            <div key={f.n} className="card p-4">
+              <p className="text-xs font-semibold uppercase text-navy-400">{f.label} sent</p>
+              <p className="mt-1 font-display text-2xl font-bold text-navy-900">{sent[`f${f.n}`].toLocaleString()}</p>
+              <p className="text-xs text-navy-400">day {f.day} touch</p>
+            </div>
+          ))}
+        </div>
+
+        {/* ---- Today's follow-up plan (Account B): grouped F1 / F2 / F3 ---- */}
         <div className="card">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-navy-50 p-4">
             <div className="flex items-center gap-2 font-semibold text-navy-800">
-              <BellRing size={16} className="text-amber-500" /> Follow-up Queue
-              <span className="badge bg-amber-100 text-amber-700">{queue.length}</span>
+              <BellRing size={16} className="text-amber-500" /> Today’s Follow-up Plan
+              <span className="badge bg-navy-50 text-navy-500">Account B</span>
+              <span className="badge bg-amber-100 text-amber-700">{totalDue} due</span>
               {setFilter !== "all" && <span className="text-xs font-normal text-navy-400">· {setFilter}</span>}
             </div>
-            {queue.length > 0 && (
-              <button onClick={logAllInQueue} className="btn-ghost text-sm"><Send size={14} /> Log follow-up for all</button>
-            )}
           </div>
 
           {loading ? (
             <div className="flex justify-center py-12"><Loader2 className="animate-spin text-navy-300" /></div>
-          ) : !queue.length ? (
+          ) : totalDue === 0 ? (
             <div className="flex flex-col items-center justify-center px-6 py-12 text-center">
               <span className="mb-2 grid h-11 w-11 place-items-center rounded-2xl bg-emerald-50 text-emerald-500"><CheckCircle2 size={22} /></span>
               <p className="font-semibold text-navy-800">All caught up</p>
               <p className="text-sm text-navy-400">No follow-ups are due right now.</p>
             </div>
           ) : (
-            <ul className="divide-y divide-navy-50">
-              {queue.slice(0, 100).map((c) => (
-                <li key={c.id} className="flex flex-wrap items-center gap-3 px-4 py-3 hover:bg-amber-50/30">
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate font-medium text-navy-900">{c.email}</p>
-                    <p className="text-xs text-navy-400">
-                      {c.setName || "—"} · sent {c.daysSinceUpload}d ago
-                      {c.followUpCount > 0 && ` · ${c.followUpCount} follow-up${c.followUpCount > 1 ? "s" : ""} so far`}
-                    </p>
+            <div className="grid gap-4 p-4 sm:grid-cols-3">
+              {FOLLOWUPS.map((f) => {
+                const list = dueByF[f.n];
+                return (
+                  <div key={f.n} className="flex flex-col rounded-xl border border-navy-100 p-4">
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <p className="font-semibold text-navy-900">{f.label}</p>
+                        <p className="text-xs text-navy-400">due at day {f.day}</p>
+                      </div>
+                      <span className="font-display text-2xl font-bold text-amber-600">{list.length.toLocaleString()}</span>
+                    </div>
+                    <button onClick={() => logAllForGroup(list, f.n)} disabled={!list.length}
+                      className="btn-primary mt-3 w-full justify-center disabled:cursor-not-allowed disabled:opacity-40">
+                      <Send size={14} /> Mark all {f.short} sent
+                    </button>
+                    <ul className="mt-3 space-y-1 border-t border-navy-50 pt-3">
+                      {list.slice(0, 5).map((c) => (
+                        <li key={c.id} className="truncate text-xs text-navy-500" title={c.email}>{c.email}</li>
+                      ))}
+                      {list.length > 5 && <li className="text-xs text-navy-400">+{(list.length - 5).toLocaleString()} more</li>}
+                      {!list.length && <li className="text-xs text-navy-300">Nothing due</li>}
+                    </ul>
                   </div>
-                  <span className="badge bg-amber-100 text-amber-700">{stageLabel(c.stage)} follow-up</span>
-                  <FollowUpActions c={c} onLog={logFollowUp} onOutcome={setOutcome} />
-                </li>
-              ))}
-            </ul>
+                );
+              })}
+            </div>
           )}
         </div>
 
@@ -226,7 +269,8 @@ export default function ContactsPage() {
         {uploads.length > 0 && (
           <div className="card p-4">
             <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-navy-700">
-              <Layers size={15} className="text-navy-400" /> Upload Sets
+              <Layers size={15} className="text-navy-400" /> Daily Batches
+              <span className="badge bg-navy-50 text-navy-500">Account A</span>
               <span className="text-xs font-normal text-navy-400">({uploads.length})</span>
             </div>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -282,9 +326,9 @@ export default function ContactsPage() {
           {loading ? (
             <div className="flex justify-center py-16"><Loader2 className="animate-spin text-navy-300" /></div>
           ) : !filtered.length ? (
-            <EmptyState icon={Users} title="No contacts found"
-              hint="Upload an Excel/CSV of already-sent emails. Each starts as ‘Awaiting’, then becomes ‘Follow-up due’ at 2 / 5 / 7 days automatically.">
-              <button onClick={() => setShowUpload(true)} className="btn-primary"><Upload size={16} /> Upload Set</button>
+            <EmptyState icon={Users} title="No prospects found"
+              hint="Upload a daily batch (Excel/CSV of already-sent emails). Each becomes due for F1 at day 2, F2 at day 5 and F3 at day 7 automatically.">
+              <button onClick={() => setShowUpload(true)} className="btn-primary"><Upload size={16} /> Upload Batch</button>
             </EmptyState>
           ) : (
             <div className="overflow-x-auto">
@@ -292,10 +336,10 @@ export default function ContactsPage() {
                 <thead>
                   <tr className="text-left text-xs uppercase tracking-wide text-navy-400">
                     <th className="px-4 py-3 font-semibold">Email</th>
-                    <th className="px-4 py-3 font-semibold">Set</th>
-                    <th className="px-4 py-3 font-semibold">Day</th>
+                    <th className="px-4 py-3 font-semibold">Batch</th>
+                    <th className="px-4 py-3 font-semibold">Stage</th>
                     <th className="px-4 py-3 font-semibold">Follow-up</th>
-                    <th className="px-4 py-3 font-semibold">Sent</th>
+                    <th className="px-4 py-3 font-semibold">Original sent</th>
                     <th className="px-4 py-3 font-semibold">Actions</th>
                     <th className="px-4 py-3" />
                   </tr>
@@ -306,7 +350,9 @@ export default function ContactsPage() {
                       <td className="px-4 py-3 font-medium text-navy-900">{c.email}</td>
                       <td className="px-4 py-3 text-navy-600">{c.setName || "—"}</td>
                       <td className="px-4 py-3"><StatusBadge status={c.stage} /></td>
-                      <td className="px-4 py-3"><StatusBadge status={c.followUpStatus} /></td>
+                      <td className="px-4 py-3">
+                        {(() => { const v = followUpView(c); return <StatusBadge status={v.tone} label={v.label} />; })()}
+                      </td>
                       <td className="px-4 py-3 text-navy-500">
                         {fmtDate(c.originalSentAt || c.uploadedAt || c.createdAt)}
                         <span className="block text-xs text-navy-300">
@@ -432,8 +478,8 @@ function UploadSetModal({ onClose, onDone }) {
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-navy-950/40 p-4" onClick={onClose}>
       <div className="card w-full max-w-lg p-6" onClick={(e) => e.stopPropagation()}>
-        <h3 className="font-display text-lg font-bold text-navy-900">Upload Sent Emails</h3>
-        <p className="mt-1 text-sm text-navy-400">Excel/CSV with an email column. The send date drives the automatic 2 / 5 / 7-day follow-up reminders.</p>
+        <h3 className="font-display text-lg font-bold text-navy-900">Upload Daily Batch</h3>
+        <p className="mt-1 text-sm text-navy-400">Excel/CSV with an email column (the prospects Account A emailed). The send date drives the automatic F1/F2/F3 follow-ups at days 2 / 5 / 7.</p>
 
         <div className="mt-4 space-y-3">
           <label className="block">
